@@ -30,6 +30,7 @@ log = logging.getLogger("tg2discord")
 
 DISCORD_API = "https://discord.com/api/v10"
 DISCORD_TEXT_LIMIT = 2000
+DISCORD_MAX_FILES = 10
 
 
 # ───────────────────────── 설정 ─────────────────────────
@@ -157,27 +158,31 @@ class Discord:
             self.dm_channels[user_id] = data["id"]
         return self.dm_channels[user_id]
 
-    async def _post(self, url: str, headers: dict, content: str, file: tuple[str, bytes] | None) -> None:
+    async def _post(self, url: str, headers: dict, content: str, files: list[tuple[str, bytes]]) -> None:
         payload = {
             "content": content,
             # 텔레그램 본문에 @everyone 등이 있어도 디스코드에서 알림이 터지지 않게
             "allowed_mentions": {"parse": []},
         }
-        if file is None:
+        if not files:
             await self._request("POST", url, headers=headers, json=payload)
             return
-        name, blob = file
 
         def build() -> aiohttp.FormData:
             form = aiohttp.FormData()
             form.add_field("payload_json", json.dumps(payload), content_type="application/json")
-            form.add_field("files[0]", blob, filename=name)
+            for i, (name, blob) in enumerate(files):
+                form.add_field(f"files[{i}]", blob, filename=name)
             return form
 
         await self._request("POST", url, headers=headers, build_data=build)
 
-    async def send(self, text: str, file: tuple[str, bytes] | None = None) -> None:
+    async def send(self, text: str, files: list[tuple[str, bytes]] | None = None) -> None:
+        files = files or []
         chunks = split_text(text)
+        # 디스코드는 메시지 1건에 첨부 최대 10개
+        file_groups = [files[i : i + DISCORD_MAX_FILES] for i in range(0, len(files), DISCORD_MAX_FILES)] or [[]]
+
         targets: list[tuple[str, dict]] = []
         if self.cfg.webhook_url:
             targets.append((self.cfg.webhook_url + "?wait=true", {}))
@@ -186,62 +191,70 @@ class Discord:
             targets.append((f"{DISCORD_API}/channels/{cid}/messages", self._bot_headers()))
 
         for url, headers in targets:
+            # 텍스트 조각들 → 마지막 조각에 첫 첨부 묶음, 남는 첨부는 이어서 전송
             for i, chunk in enumerate(chunks):
                 is_last = i == len(chunks) - 1
-                await self._post(url, headers, chunk, file if is_last else None)
+                await self._post(url, headers, chunk, file_groups[0] if is_last else [])
+            for group in file_groups[1:]:
+                await self._post(url, headers, "", group)
 
 
 # ───────────────────────── 텔레그램 → 디스코드 ─────────────────────────
 
 
-async def build_text(event, cfg: Config) -> str:
-    msg = event.message
+async def build_text(event, messages: list, cfg: Config) -> str:
+    """messages: 단일 메시지면 [msg], 앨범이면 묶음 전체."""
+    first = messages[0]
     chat = await event.get_chat()
     sender = await event.get_sender()
     chat_name = utils.get_display_name(chat) or str(event.chat_id)
     sender_name = utils.get_display_name(sender) if sender else ""
-    when = msg.date.astimezone(cfg.tz).strftime("%Y-%m-%d %H:%M")
+    when = first.date.astimezone(cfg.tz).strftime("%Y-%m-%d %H:%M")
 
     header = f"**[{chat_name}]**"
     if sender_name and sender_name != chat_name:
         header += f" {sender_name}"
     header += f" · {when}"
-    if msg.fwd_from:
+    if first.fwd_from:
         header += " · (전달됨)"
 
-    body = msg.message or ""
-    if not body and msg.media and msg.file is None:
-        body = f"_({type(msg.media).__name__.replace('MessageMedia', '')} 메시지)_"
+    # 앨범은 캡션이 아무 사진에나 붙어 있을 수 있음
+    body = "\n".join(m.message for m in messages if m.message)
+    if not body and len(messages) == 1 and first.media and first.file is None:
+        body = f"_({type(first.media).__name__.replace('MessageMedia', '')} 메시지)_"
     return f"{header}\n{body}".rstrip()
 
 
-async def extract_file(event, cfg: Config) -> tuple[tuple[str, bytes] | None, str]:
-    """(첨부파일, 추가 안내문) 반환."""
-    msg = event.message
-    f = msg.file
-    if f is None:
-        return None, ""
-    size = f.size or 0
-    if size > cfg.max_file_bytes:
-        return None, f"\n_(첨부 {f.name or ''} {size / 1048576:.1f}MB — 용량 초과로 생략)_"
-    blob = await msg.download_media(file=bytes)
-    if not blob:
-        return None, ""
-    name = f.name or f"telegram_{msg.id}{f.ext or ''}"
-    return (name, blob), ""
+async def extract_files(messages: list, cfg: Config) -> tuple[list[tuple[str, bytes]], str]:
+    """(첨부파일 목록, 추가 안내문) 반환."""
+    files: list[tuple[str, bytes]] = []
+    notes = ""
+    for msg in messages:
+        f = msg.file
+        if f is None:
+            continue
+        size = f.size or 0
+        if size > cfg.max_file_bytes:
+            notes += f"\n_(첨부 {f.name or ''} {size / 1048576:.1f}MB — 용량 초과로 생략)_"
+            continue
+        blob = await msg.download_media(file=bytes)
+        if blob:
+            files.append((f.name or f"telegram_{msg.id}{f.ext or ''}", blob))
+    return files, notes
 
 
 async def worker(queue: asyncio.Queue, discord: Discord, cfg: Config) -> None:
-    """메시지 순서를 지키려고 하나씩 순차 전송."""
+    """메시지 순서를 지키려고 하나씩 순차 전송. 큐 항목: (event, [messages])."""
     while True:
-        event = await queue.get()
+        event, messages = await queue.get()
+        ids = [m.id for m in messages]
         try:
-            text = await build_text(event, cfg)
-            file, note = await extract_file(event, cfg)
-            await discord.send(text + note, file)
-            log.info("전달 완료: chat=%s msg=%s", event.chat_id, event.message.id)
+            text = await build_text(event, messages, cfg)
+            files, notes = await extract_files(messages, cfg)
+            await discord.send(text + notes, files)
+            log.info("전달 완료: chat=%s msg=%s 첨부=%d", event.chat_id, ids, len(files))
         except Exception:
-            log.exception("전달 실패: chat=%s msg=%s", event.chat_id, getattr(event.message, "id", "?"))
+            log.exception("전달 실패: chat=%s msg=%s", event.chat_id, ids)
         finally:
             queue.task_done()
 
@@ -309,7 +322,15 @@ async def cmd_run(cfg: Config) -> None:
 
         @client.on(events.NewMessage(**kwargs))
         async def _on_message(event):
-            await queue.put(event)
+            if event.message.grouped_id:  # 앨범 사진은 아래 Album 핸들러가 한 번에 처리
+                return
+            await queue.put((event, [event.message]))
+
+        album_filter = None if cfg.forward_outgoing else (lambda e: not e.messages[0].out)
+
+        @client.on(events.Album(chats=kwargs["chats"], func=album_filter))
+        async def _on_album(event):
+            await queue.put((event, list(event.messages)))
 
         task = asyncio.create_task(worker(queue, discord, cfg))
         me = await client.get_me()
