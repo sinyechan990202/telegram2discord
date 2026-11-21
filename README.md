@@ -52,7 +52,7 @@ ssh -i ssh-key-2026-11-20.key ubuntu@<서버_공인IP>
 git clone https://github.com/sinyechan990202/telegram2discord.git
 cd telegram2discord
 ./install.sh                                   # venv + 패키지 + systemd 등록
-nano .env                                      # 값 채우기
+nano ~/.config/tg2discord/.env                 # 값 채우기 (git 폴더 밖 → pull 해도 유지)
 
 .venv/bin/python tg2discord.py login           # 텔레그램 로그인 (사용자 모드: 전화번호 → 인증코드)
 .venv/bin/python tg2discord.py chats           # (선택) 채팅 ID 확인 → .env 의 TG_SOURCE_CHATS 에 입력
@@ -65,9 +65,12 @@ journalctl -u tg2discord -f                    # 로그
 
 저장소가 private 이면 `git clone` 대신 PC에서 `scp -i ssh-key-2026-11-20.key -r telegram2discord ubuntu@<서버_공인IP>:~/` 로 복사.
 
+설정(`.env`)과 로그인 세션은 **`~/.config/tg2discord/`** 에 저장된다. 저장소 폴더 밖이라 `git pull`·재clone·폴더 삭제에도 유지된다.
+예전 버전처럼 저장소 폴더에 `.env` 가 있으면 처음 실행할 때 자동으로 옮겨진다.
+
 `.env` 를 바꾼 뒤에는 `sudo systemctl restart tg2discord`.
 
 ## 주의
 
-- `tg2discord.session` 파일은 **텔레그램 계정 로그인 그 자체**다. 유출되면 계정 탈취와 같으니 공유·커밋 금지 (`.gitignore` 처리됨).
+- `~/.config/tg2discord/tg2discord.session` 파일은 **텔레그램 계정 로그인 그 자체**다. 유출되면 계정 탈취와 같으니 공유·커밋 금지 (`.gitignore` 처리됨).
 - 사용자 모드에서 `TG_SOURCE_CHATS` 를 비우면 개인 대화까지 전부 디스코드로 넘어간다. 필요한 채팅만 지정할 것.

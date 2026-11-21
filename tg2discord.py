@@ -25,7 +25,25 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events, utils
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+# 설정·로그인 세션은 git 폴더 밖에 둔다 → git pull/clone/clean 을 해도 절대 안 지워짐
+CONFIG_DIR = Path(os.getenv("TG2DISCORD_HOME") or Path.home() / ".config" / "tg2discord")
+ENV_FILE = CONFIG_DIR / ".env"
+
+
+def _migrate_from_repo_dir() -> None:
+    """예전 버전처럼 저장소 폴더에 있던 .env / 세션 파일을 CONFIG_DIR 로 옮긴다."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+    for old in [BASE_DIR / ".env", *BASE_DIR.glob("*.session")]:
+        new = CONFIG_DIR / old.name
+        if old.is_file() and old.stat().st_size > 0 and not new.exists():
+            old.replace(new)
+            os.chmod(new, 0o600)
+            print(f"[tg2discord] {old} → {new} 로 옮김", file=sys.stderr)
+
+
+_migrate_from_repo_dir()
+load_dotenv(ENV_FILE)
 
 log = logging.getLogger("tg2discord")
 
@@ -55,7 +73,7 @@ class Config:
         self.api_id = int(_env("TG_API_ID") or 0)
         self.api_hash = _env("TG_API_HASH")
         self.bot_token = _env("TG_BOT_TOKEN")  # 비우면 사용자 계정 모드
-        self.session = str(BASE_DIR / (_env("TG_SESSION") or "tg2discord"))
+        self.session = str(CONFIG_DIR / (_env("TG_SESSION") or "tg2discord"))
         self.source_chats = [_chat_ref(x) for x in _csv("TG_SOURCE_CHATS")]
         self.forward_outgoing = _env("FORWARD_OUTGOING").lower() in ("1", "true", "yes")
 
@@ -80,7 +98,7 @@ class Config:
             if self.discord_user_ids and not self.discord_bot_token:
                 errors.append("DISCORD_USER_IDS 로 DM 을 보내려면 DISCORD_BOT_TOKEN 필요")
         if errors:
-            sys.exit("설정 오류:\n  - " + "\n  - ".join(errors))
+            sys.exit(f"설정 오류 ({ENV_FILE}):\n  - " + "\n  - ".join(errors))
 
 
 # ───────────────────────── 디스코드 ─────────────────────────

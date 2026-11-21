@@ -11,6 +11,7 @@ ExecStart=__DIR__/.venv/bin/python __DIR__/tg2discord.py run
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/__USER__
 
 [Install]
 WantedBy=multi-user.target
