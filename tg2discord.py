@@ -6,6 +6,7 @@
     python tg2discord.py login   # 최초 1회: 텔레그램 로그인 (사용자 모드는 전화번호 + 인증코드)
     python tg2discord.py chats   # 내 채팅/채널 목록과 ID 출력 (TG_SOURCE_CHATS 고를 때)
     python tg2discord.py test    # 디스코드로 테스트 메시지 1건 전송
+    python tg2discord.py last 3  # 지정한 방의 최신 메시지 3건(기본 1)을 지금 디스코드로 전송
     python tg2discord.py run     # 상시 실행 (systemd 서비스가 이걸 실행)
 """
 
@@ -243,18 +244,22 @@ async def extract_files(messages: list, cfg: Config) -> tuple[list[tuple[str, by
     return files, notes
 
 
+async def forward(discord: Discord, event, messages: list, cfg: Config) -> None:
+    """메시지 1건(또는 앨범 1묶음)을 디스코드로 전달."""
+    text = await build_text(event, messages, cfg)
+    files, notes = await extract_files(messages, cfg)
+    await discord.send(text + notes, files)
+    log.info("전달 완료: chat=%s msg=%s 첨부=%d", event.chat_id, [m.id for m in messages], len(files))
+
+
 async def worker(queue: asyncio.Queue, discord: Discord, cfg: Config) -> None:
     """메시지 순서를 지키려고 하나씩 순차 전송. 큐 항목: (event, [messages])."""
     while True:
         event, messages = await queue.get()
-        ids = [m.id for m in messages]
         try:
-            text = await build_text(event, messages, cfg)
-            files, notes = await extract_files(messages, cfg)
-            await discord.send(text + notes, files)
-            log.info("전달 완료: chat=%s msg=%s 첨부=%d", event.chat_id, ids, len(files))
+            await forward(discord, event, messages, cfg)
         except Exception:
-            log.exception("전달 실패: chat=%s msg=%s", event.chat_id, ids)
+            log.exception("전달 실패: chat=%s msg=%s", event.chat_id, [m.id for m in messages])
         finally:
             queue.task_done()
 
@@ -306,6 +311,38 @@ async def cmd_test(cfg: Config) -> None:
     print("디스코드 테스트 전송 완료")
 
 
+async def cmd_last(cfg: Config) -> None:
+    """TG_SOURCE_CHATS 방의 최신 메시지 N건(기본 1)을 지금 바로 디스코드로 보내는 테스트."""
+    cfg.validate()
+    if cfg.mode == "bot":
+        sys.exit("봇 모드는 지난 메시지를 읽을 수 없습니다 (텔레그램 제한). 사용자 모드에서만 가능.")
+    if not cfg.source_chats:
+        sys.exit("TG_SOURCE_CHATS 가 비어 있습니다. .env 에 방 ID 를 넣으세요.")
+    n = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+
+    client = make_client(cfg)
+    await ensure_authorized(client, cfg)
+    async with Discord(cfg) as discord:
+        for chat in cfg.source_chats:
+            # 앨범은 사진마다 메시지가 따로라서 넉넉히 가져온 뒤 묶는다 (최신순)
+            msgs = [m for m in await client.get_messages(chat, limit=n * 10) if not m.action]
+            units: list[list] = []
+            for m in msgs:
+                if m.grouped_id and units and units[-1][0].grouped_id == m.grouped_id:
+                    units[-1].append(m)
+                else:
+                    units.append([m])
+            units = units[:n]
+            if not units:
+                print(f"{chat}: 메시지 없음")
+                continue
+            for unit in reversed(units):  # 오래된 것부터 보내서 순서 유지
+                unit.sort(key=lambda m: m.id)
+                await forward(discord, unit[0], unit, cfg)
+            print(f"{chat}: 최신 {len(units)}건 전송 완료")
+    await client.disconnect()
+
+
 async def cmd_run(cfg: Config) -> None:
     cfg.validate()
     if cfg.mode == "user" and not cfg.source_chats:
@@ -350,7 +387,7 @@ async def cmd_run(cfg: Config) -> None:
             task.cancel()
 
 
-COMMANDS = {"login": cmd_login, "chats": cmd_chats, "test": cmd_test, "run": cmd_run}
+COMMANDS = {"login": cmd_login, "chats": cmd_chats, "test": cmd_test, "last": cmd_last, "run": cmd_run}
 
 
 def main() -> None:

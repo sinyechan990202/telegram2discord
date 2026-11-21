@@ -57,6 +57,7 @@ nano .env                                      # 값 채우기
 .venv/bin/python tg2discord.py login           # 텔레그램 로그인 (사용자 모드: 전화번호 → 인증코드)
 .venv/bin/python tg2discord.py chats           # (선택) 채팅 ID 확인 → .env 의 TG_SOURCE_CHATS 에 입력
 .venv/bin/python tg2discord.py test            # 디스코드에 테스트 메시지 오는지 확인
+.venv/bin/python tg2discord.py last            # 지정한 방의 최신 메시지 1건을 지금 디스코드로 복사 (last 5 → 5건)
 
 sudo systemctl start tg2discord                # 상시 실행
 journalctl -u tg2discord -f                    # 로그
